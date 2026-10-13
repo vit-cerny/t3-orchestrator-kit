@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How T3 orchestration works</title>
+<style>
+  :root { font-synthesis: none; }
+  body { margin: 0; color: var(--foreground); font: 14px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  h2 { font-size: 15px; margin: 26px 0 10px; letter-spacing: -.01em; }
+  h2:first-of-type { margin-top: 4px; }
+  p { margin: 0 0 10px; color: var(--muted-foreground); }
+  code { font: 12.5px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: var(--secondary); color: var(--secondary-foreground); padding: 1px 5px; border-radius: 5px; }
+  .box { border: 1px solid var(--border); background: var(--card); border-radius: var(--radius, 10px); padding: 16px; }
+  .grid { display: grid; gap: 10px; }
+  .layers { grid-template-columns: 1fr; }
+  .layer { display: grid; grid-template-columns: 96px 1fr; align-items: center; gap: 14px; }
+  .tag { font-size: 11px; text-transform: uppercase; letter-spacing: .07em; color: var(--muted-foreground); }
+  .layer strong { font-weight: 600; }
+  .layer span { color: var(--muted-foreground); }
+  .arrow { text-align: center; color: var(--muted-foreground); font-size: 12px; line-height: 1; margin: 6px 0; }
+  ol.flow { margin: 0; padding: 0; list-style: none; counter-reset: s; display: grid; gap: 8px; }
+  ol.flow li { counter-increment: s; display: grid; grid-template-columns: 24px 1fr; gap: 10px; align-items: start; }
+  ol.flow li::before { content: counter(s); width: 22px; height: 22px; border-radius: 50%; background: var(--accent-surface, var(--secondary)); color: var(--accent-surface-foreground, var(--foreground)); display: grid; place-items: center; font-size: 12px; font-weight: 600; }
+  ol.flow b { font-weight: 600; }
+  ol.flow em { font-style: normal; color: var(--muted-foreground); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted-foreground); }
+  td code { white-space: nowrap; }
+  .talk { grid-template-columns: 1fr; gap: 12px; }
+  .talkRow { display: grid; grid-template-columns: 1fr 60px 1fr; align-items: center; gap: 8px; }
+  .pill { text-align: center; font-size: 11px; color: var(--accent-foreground, var(--foreground)); background: var(--accent); border-radius: 999px; padding: 3px 0; }
+  .ok { display: inline-block; font-size: 12px; border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 6px; padding: 6px 10px; color: var(--muted-foreground); }
+  @media (max-width: 560px) { .layer { grid-template-columns: 1fr; gap: 4px; } .talkRow { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+
+<h2>The five layers, bottom-up</h2>
+<div class="grid layers">
+  <div class="box layer"><div class="tag">You</div><div><strong>T3 app</strong> <span>- desktop, web or mobile. You type one prompt.</span></div></div>
+  <div class="arrow">&#9660;</div>
+  <div class="box layer"><div class="tag">T3 server</div><div><strong>Threads, runs, checkpoints</strong> <span>- durable state, not a model. Holds no model keys.</span></div></div>
+  <div class="arrow">&#9660;</div>
+  <div class="box layer"><div class="tag">Adapter</div><div><strong>provider-&lt;name&gt;</strong> <span>- one per harness: opencode, codex, claude, cursor, grok, pi, antigravity, ACP registry.</span></div></div>
+  <div class="arrow">&#9660;</div>
+  <div class="box layer"><div class="tag">Harness</div><div><strong>The CLI it spawns</strong> <span>- a real installed, authenticated agent process. It owns the model, the keys, the tools.</span></div></div>
+  <div class="arrow">&#9660;</div>
+  <div class="box layer"><div class="tag">MCP</div><div><strong>t3-code MCP server</strong> <span>- injected into every harness session, authenticated per thread. This is how an agent reaches T3.</span></div></div>
+</div>
+
+<h2>What happens when you send a prompt</h2>
+<div class="box">
+<ol class="flow">
+  <li><div><b>Plan.</b> <em>The agent calls <code>orchestrator_capabilities</code> to see which providers can run child tasks, then writes goal, phases, file ownership and the acceptance check.</em></div></li>
+  <li><div><b>Skeleton.</b> <em>It builds the shared interfaces itself and freezes them. That is what lets parallel agents merge.</em></div></li>
+  <li><div><b>Delegate.</b> <em>One <code>delegate_task</code> per disjoint file set. Each becomes a T3 child thread on any provider, with <code>role</code> and a self-contained prompt.</em></div></li>
+  <li><div><b>Work the critical path.</b> <em>The parent keeps building the hard parts instead of idling.</em></div></li>
+  <li><div><b>Coordinate.</b> <em><code>task_status</code> reads results, <code>t3_thread_send</code> steers, <code>t3_thread_read</code> inspects, <code>task_cancel</code> stops.</em></div></li>
+  <li><div><b>Verify, then merge.</b> <em>The parent runs the acceptance command itself. A child's summary is not evidence.</em></div></li>
+</ol>
+</div>
+
+<h2>Who talks to whom</h2>
+<p>Children are isolated: each gets only its own prompt and cannot see the others. T3 is the bus.</p>
+<div class="box grid talk">
+  <div class="talkRow">
+    <div class="box" style="padding:16px"><b>Orchestrator</b><br><span style="color:var(--muted-foreground)">plans, relays, verifies, merges</span></div>
+    <div class="pill">delegate</div>
+    <div class="box" style="padding:16px"><b>Child A</b> <span style="color:var(--muted-foreground)">- implementation</span></div>
+  </div>
+  <div class="talkRow">
+    <div class="box" style="padding:16px"><b>A's result</b><br><span style="color:var(--muted-foreground)">read with task_status</span></div>
+    <div class="pill">relay</div>
+    <div class="box" style="padding:16px"><b>Child B</b> <span style="color:var(--muted-foreground)">- built on A's output</span></div>
+  </div>
+  <div class="talkRow">
+    <div class="box" style="padding:16px"><b>Any thread</b><br><span style="color:var(--muted-foreground)">via t3_thread_send / read</span></div>
+    <div class="pill">live</div>
+    <div class="box" style="padding:16px"><b>Any other thread</b> <span style="color:var(--muted-foreground)">- agent to agent</span></div>
+  </div>
+</div>
+
+<h2>Tool map</h2>
+<table>
+  <thead><tr><th>You want</th><th>Tool</th></tr></thead>
+  <tbody>
+    <tr><td>Create a subagent on any provider</td><td><code>delegate_task</code></td></tr>
+    <tr><td>See which providers can take child work</td><td><code>orchestrator_capabilities</code></td></tr>
+    <tr><td>Read / cancel a delegated task</td><td><code>task_status</code>, <code>task_cancel</code></td></tr>
+    <tr><td>Message or steer any thread</td><td><code>t3_thread_send</code>, <code>t3_thread_wait</code>, <code>t3_thread_interrupt</code></td></tr>
+    <tr><td>Read any thread's timeline</td><td><code>t3_thread_read</code></td></tr>
+    <tr><td>Batch threads, or one in its own worktree</td><td><code>create_threads</code>, <code>t3_thread_launch</code></td></tr>
+  </tbody>
+</table>
+
+<p style="margin-top:16px"><span class="ok">Live proof from this thread &mdash; a real <code>delegate_task</code> ran on <code>opencode</code> / <code>opencode-go/deepseek-v4.1-flash</code> and returned <code>T3-SUBAGENT-OK</code> with <code>status: completed</code>.</span></p>
+
+</body>
+</html>
